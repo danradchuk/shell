@@ -1,15 +1,35 @@
 #include "slice.h"
 #include "utils.h"
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/_types/_pid_t.h>
 #include <unistd.h>
 
+pid_t child_pid = -1;
+
+static void sigHandler(int sig) {
+  if (child_pid > 0) {
+    // Kill the child's process groups if it's running
+    kill(-child_pid, SIGINT);
+  } else {
+    write(STDOUT_FILENO, "\nsh:$ ", 6);
+  }
+}
+
 int main(int argc, char **argv) {
+  int status;
+  pid_t w;
+
   for (;;) {
+    if (signal(SIGINT, sigHandler) == SIG_ERR) {
+      perror("signal");
+      exit(1);
+    }
+
     // 1. Wait for a user input
-    printf("> ");
+    printf("sh:$ ");
     char *input = NULL;
     size_t len = 0;
     ssize_t read;
@@ -36,10 +56,15 @@ int main(int argc, char **argv) {
 
     tokenize_user_input(&slice, input);
 
-    print_slice(&slice);
+    // print_slice(&slice);
 
     char *cmd = get_slice_elem(&slice, 0);
     append_null(&slice); // required for calling execvp
+
+    // handle exit
+    if (strcmp(cmd, "exit") == 0) {
+      exit(0);
+    }
 
     // 3. fork & exec
     pid_t pid = fork();
@@ -54,7 +79,20 @@ int main(int argc, char **argv) {
         exit(1); // Exit if execvp fails
       }
     } else {
-      wait(NULL);
+      child_pid = pid;
+      // waitpid(child_pid, NULL, 0); // Wait for the child to terminate
+
+      do {
+        w = waitpid(child_pid, NULL, WUNTRACED | WCONTINUED);
+        if (w == -1) {
+          perror("waitpid");
+          exit(EXIT_FAILURE);
+        }
+
+      } while (!WIFEXITED(status) &&
+               !WIFSIGNALED(status)); // TODO should handle
+                                      //  suspend too
+      child_pid = -1;
     }
 
     dispose_slice(&slice);
