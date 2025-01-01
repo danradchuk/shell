@@ -11,7 +11,7 @@ pid_t child_pid = -1;
 
 static void sigHandler(int sig) {
   if (child_pid > 0) {
-    // Kill the child's process groups if it's running
+    // Kill a child's process group if it's running
     kill(-child_pid, SIGINT);
   } else {
     write(STDOUT_FILENO, "\nsh:$ ", 6);
@@ -74,6 +74,7 @@ int main(int argc, char **argv) {
     }
 
     if (pid == 0) {
+      signal(SIGINT, SIG_DFL);
       if (execvp(cmd, (&slice)->data) == -1) {
         perror("execvp failed");
         exit(1); // Exit if execvp fails
@@ -83,7 +84,7 @@ int main(int argc, char **argv) {
       // waitpid(child_pid, NULL, 0); // Wait for the child to terminate
 
       do {
-        w = waitpid(child_pid, NULL, WUNTRACED | WCONTINUED);
+        w = waitpid(child_pid, &status, WUNTRACED | WCONTINUED);
         if (w == -1) {
           perror("waitpid");
           exit(EXIT_FAILURE);
