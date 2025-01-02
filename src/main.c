@@ -100,6 +100,7 @@ int main(int argc, char **argv) {
       child_pid = -1;
     }
 
+    free(input);
     dispose_slice(&slice);
   }
 
