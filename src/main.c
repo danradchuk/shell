@@ -19,7 +19,6 @@ static void sigHandler(int sig) {
 }
 
 int main(int argc, char **argv) {
-  int status;
   pid_t w;
 
   for (;;) {
@@ -74,6 +73,7 @@ int main(int argc, char **argv) {
     }
 
     if (pid == 0) {
+      setpgid(0, 0);
       signal(SIGINT, SIG_DFL);
       if (execvp(cmd, (&slice)->data) == -1) {
         perror("execvp failed");
@@ -83,8 +83,11 @@ int main(int argc, char **argv) {
       child_pid = pid;
       // waitpid(child_pid, NULL, 0); // Wait for the child to terminate
 
+      int status;
+
       do {
         w = waitpid(child_pid, &status, WUNTRACED | WCONTINUED);
+
         if (w == -1) {
           perror("waitpid");
           exit(EXIT_FAILURE);
