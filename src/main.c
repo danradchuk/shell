@@ -5,9 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/_types/_pid_t.h>
+#include <sys/signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
-pid_t fg_pid = -1;
+volatile sig_atomic_t pid;
+volatile sig_atomic_t fg_pid;
 
 static void handle_sigint(int sig) {
   if (fg_pid > 0) { // there is a foreground task
@@ -18,12 +21,24 @@ static void handle_sigint(int sig) {
   }
 }
 
+static void handle_sigchld(int sig) { pid = waitpid(-1, NULL, 0); }
+
 int main(int argc, char **argv) {
+  sigset_t new_mask, old_mask;
+
   // handle sigint
   if (signal(SIGINT, handle_sigint) == SIG_ERR) {
     perror("signal");
     exit(1);
   }
+
+  if (signal(SIGCHLD, handle_sigchld) == SIG_ERR) {
+    perror("signal");
+    exit(1);
+  }
+
+  sigemptyset(&new_mask);
+  sigaddset(&new_mask, SIGCHLD);
 
   for (;;) {
     printf("sh:$ ");
@@ -52,13 +67,15 @@ int main(int argc, char **argv) {
     }
 
     // fork & exec
-    pid_t pid = fork();
-    if (pid < 0) {
+    sigprocmask(SIG_BLOCK, &new_mask, &old_mask);
+
+    pid_t c_pid = fork();
+    if (c_pid < 0) {
       perror("fork failed");
       return 1;
     }
 
-    if (pid == 0) {
+    if (c_pid == 0) {
       setpgid(0, 0);
       signal(SIGINT, SIG_DFL);
 
@@ -67,22 +84,12 @@ int main(int argc, char **argv) {
         exit(1);
       }
     } else {
-      fg_pid = pid;
-
-      int status;
-      int pid;
-
-      do {
-        pid = waitpid(fg_pid, &status, WUNTRACED | WCONTINUED);
-
-        if (pid == -1) {
-          perror("waitpid");
-          exit(EXIT_FAILURE);
-        }
-
-      } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-
-      fg_pid = -1;
+      fg_pid = c_pid;
+      pid = 0;
+      while (!pid) {
+        sigsuspend(&old_mask);
+      }
+      sigprocmask(SIG_SETMASK, &old_mask, NULL);
     }
 
     free(input);
