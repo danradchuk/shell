@@ -10,12 +10,12 @@
 pid_t child_pid = -1;
 
 static void sigHandler(int sig) {
-  // if (child_pid > 0) { // there is a foreground task
-  //   // Kill a child's process group if it's running
-  //   kill(-child_pid, SIGINT);
-  // } else {
-  write(STDOUT_FILENO, "\nsh:$ ", 6);
-  // }
+  if (child_pid > 0) { // there is a foreground task
+    // Kill a child's process group if it's running
+    kill(-child_pid, SIGINT);
+  } else {
+    write(STDOUT_FILENO, "\nsh:$ ", 6);
+  }
 }
 
 int main(int argc, char **argv) {
