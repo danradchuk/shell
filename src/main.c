@@ -7,27 +7,25 @@
 #include <sys/_types/_pid_t.h>
 #include <unistd.h>
 
-pid_t child_pid = -1;
+pid_t fg_pid = -1;
 
-static void sigHandler(int sig) {
-  if (child_pid > 0) { // there is a foreground task
+static void handle_sigint(int sig) {
+  if (fg_pid > 0) { // there is a foreground task
     // Kill a child's process group if it's running
-    kill(-child_pid, SIGINT);
+    kill(-fg_pid, SIGINT);
   } else {
     write(STDOUT_FILENO, "\nsh:$ ", 6);
   }
 }
 
 int main(int argc, char **argv) {
-  pid_t w;
+  // handle sigint
+  if (signal(SIGINT, handle_sigint) == SIG_ERR) {
+    perror("signal");
+    exit(1);
+  }
 
   for (;;) {
-    if (signal(SIGINT, sigHandler) == SIG_ERR) {
-      perror("signal");
-      exit(1);
-    }
-
-    // 1. Wait for a user input
     printf("sh:$ ");
     char *input = NULL;
     size_t len = 0;
@@ -38,25 +36,13 @@ int main(int argc, char **argv) {
       perror("getline");
       return 1;
     }
-
     remove_trailing_whitespaces(input);
 
-    // 2. Parse the user input
-    //    ls    -lh              /etc
-    //    |      |                |
-    // command  options (opt.)  argument (opt.)
-
-    // extractCommand(0) -> offset for options
-    // extractOptions(offset for options) -> offset for arguments
-    // extractArguments(offset for arauments)
-
+    // parse user input
     Slice slice;
     init_slice(&slice, 4);
-
     tokenize_user_input(&slice, input);
-
     // print_slice(&slice);
-
     char *cmd = get_slice_elem(&slice, 0);
     append_null(&slice); // required for calling execvp
 
@@ -65,7 +51,7 @@ int main(int argc, char **argv) {
       exit(0);
     }
 
-    // 3. fork & exec
+    // fork & exec
     pid_t pid = fork();
     if (pid < 0) {
       perror("fork failed");
@@ -78,26 +64,25 @@ int main(int argc, char **argv) {
 
       if (execvp(cmd, (&slice)->data) == -1) {
         perror("execvp failed");
-        exit(1); // Exit if execvp fails
+        exit(1);
       }
     } else {
-      child_pid = pid;
-      // waitpid(child_pid, NULL, 0); // Wait for the child to terminate
+      fg_pid = pid;
 
       int status;
+      int pid;
 
       do {
-        w = waitpid(child_pid, &status, WUNTRACED | WCONTINUED);
+        pid = waitpid(fg_pid, &status, WUNTRACED | WCONTINUED);
 
-        if (w == -1) {
+        if (pid == -1) {
           perror("waitpid");
           exit(EXIT_FAILURE);
         }
 
-      } while (!WIFEXITED(status) &&
-               !WIFSIGNALED(status)); // TODO should handle
-                                      //  suspend too
-      child_pid = -1;
+      } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+
+      fg_pid = -1;
     }
 
     free(input);
