@@ -1,6 +1,6 @@
+#include "job.c"
 #include "slice.h"
 #include "utils.h"
-#include <_string.h>
 #include <err.h>
 #include <signal.h>
 #include <stdio.h>
@@ -10,88 +10,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define MAX_JOB 100
-
-typedef struct Job {
-  char *cmd;
-  pid_t pid;
-  char *status;
-} Job;
-
 // Global State
 Job *jobs[MAX_JOB];
-int jobs_count = 0;
+size_t *jobs_count = 0;
 volatile sig_atomic_t pid;
 volatile sig_atomic_t fg_pid;
 
-static void add_job(pid_t pid, char *cmd) {
-  if (jobs_count >= MAX_JOB - 1) {
-    write(STDOUT_FILENO, "Max jobs count has reached.\n", 29);
-    return;
-  }
-
-  Job *j = malloc(sizeof(Job));
-  if (j == NULL) {
-    err(EXIT_FAILURE, "malloc");
-  }
-
-  j->cmd = cmd;
-  j->pid = pid;
-  j->status = "running";
-
-  if (jobs[jobs_count] != NULL) {
-    for (int i = 0; i < MAX_JOB; i++) { // find a next free slot for the job
-      if (jobs[i] == NULL) {
-        jobs[jobs_count] = j;
-      }
-    }
-  } else {
-    jobs[jobs_count] = j;
-  }
-
-  jobs_count++;
-}
-
-static void delete_job(pid_t pid) {
-  for (int i = 0; i < MAX_JOB; i++) {
-    if (jobs[i] != NULL && jobs[i]->pid == pid) {
-      free(jobs[i]);
-      jobs_count--;
-    }
-  }
-}
-
-static void change_job_status(pid_t pid, char *status) {
-  for (int i = 0; i < MAX_JOB; i++) {
-    if (jobs[i] != NULL && jobs[i]->pid == pid) {
-      jobs[i]->status = status;
-    }
-  }
-}
-
-static void list_job() {
-  if (jobs_count == 0) {
-    printf("jobs: There are no jobs\n");
-    return;
-  }
-
-  // int spaces = 4;
-  for (int i = 0; i < MAX_JOB; i++) {
-    if (jobs[i] != NULL) {
-      printf("PID   COMMAND    STATUS\n");
-      printf("%d    %s          %s\n", jobs[i]->pid, jobs[i]->cmd,
-             jobs[i]->status);
-    }
-  }
-}
-
-static void handle_sigcont(int sig) {}
-
 static void handle_sigint(int sig) {
-  // char buf[256];
-  // int len = snprintf(buf, sizeof(buf), "\n[%d]\n", fg_pid);
-  // write(STDOUT_FILENO, buf, len);
-
   if (fg_pid > 0) { // there is a foreground task
     // Kill a child's process group if it's running
     kill(-fg_pid, SIGINT);
@@ -99,7 +24,6 @@ static void handle_sigint(int sig) {
     write(STDOUT_FILENO, "\nsh:$ ", 6);
   }
 }
-
 static void handle_sigtstp(int sig) {
   if (fg_pid > 0) { // there is a foreground task
     // Kill a child's process group if it's running
@@ -108,36 +32,37 @@ static void handle_sigtstp(int sig) {
     write(STDOUT_FILENO, "\nsh:$ ", 6);
   }
 }
-
 static void handle_sigchld(int sig) {
-  // pid = waitpid(-1, NULL, 0); // must be while loop to reap all children
-  // // printf("%d\n", pid);
-  // if (pid != fg_pid) {
-  //   char buf[256];
-  //   int len = snprintf(buf, sizeof(buf), "\n[%d] has ended.\n", pid);
-  //   write(STDOUT_FILENO, buf, len);
-  //   write(STDOUT_FILENO, "sh:$ ", 5);
-  // }
-
   int status;
   pid_t waited_pid;
 
   while ((waited_pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+    pid = waited_pid;
+    Job *job = get_job_by_pid(jobs, pid);
+
     if (WIFSTOPPED(status)) {
-      change_job_status(waited_pid, "stopped");
-      write(STDOUT_FILENO, "sh:$ 1", 5);
+      // change_job_status(waited_pid, "stopped");
+
+      job->status = "stopped";
+
+      char buf[256];
+      int len =
+          snprintf(buf, sizeof(buf), "\nsh: Job %zu, [%d] '%s' has stopped.\n",
+                   job->idx, waited_pid, "sleep");
+      write(STDOUT_FILENO, buf, len);
       return;
     }
 
-    if (waited_pid != fg_pid) { // background job
+    if (job->is_background) { // background job
       char buf[256];
-      int len = snprintf(buf, sizeof(buf), "\nsh: Job, [%d] '%s' has ended.\n",
-                         waited_pid, "sleep");
+      int len =
+          snprintf(buf, sizeof(buf), "\nsh: Job %zu, [%d] '%s' has ended.\n",
+                   job->idx, waited_pid, "sleep");
       write(STDOUT_FILENO, buf, len);
       write(STDOUT_FILENO, "sh:$ ", 5);
-      delete_job(waited_pid);
     }
-    pid = waited_pid;
+
+    delete_job(jobs, jobs_count, waited_pid);
   }
 }
 
@@ -204,7 +129,7 @@ int main(int argc, char **argv) {
 
     // handle jobs list
     if (strcmp(cmd, "jobs") == 0) {
-      list_job();
+      list_job(jobs, *jobs_count);
       continue;
     }
 
@@ -214,8 +139,7 @@ int main(int argc, char **argv) {
         char *opt = get_slice_elem(&slice, 1);
         if (strcmp(opt, "-CONT") == 0) {
           char *pid = get_slice_elem(&slice, 2);
-          change_job_status(atoi(pid), "running");
-          continue;
+          change_job_status(jobs, atoi(pid), "running");
         }
       }
     }
@@ -231,8 +155,8 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    if (c_pid == 0) {
-      setpgid(0, 0); // create a new process group with PGID = c_pid
+    if (c_pid == 0) { // child
+      setpgid(0, 0);  // create a new process group with PGID = c_pid
       signal(SIGINT, SIG_DFL);
       signal(SIGTSTP, SIG_DFL);
 
@@ -243,19 +167,21 @@ int main(int argc, char **argv) {
         perror("execvp failed");
         exit(1);
       }
-    } else {
+    } else { // parent
+      // printf("Parent: %d\n", c_pid);
+      char *str = strdup(cmd);
+
       if (!bg) {
         fg_pid = c_pid;
-        printf("Parent: %d\n", fg_pid);
+        add_job(jobs, jobs_count, c_pid, str, 0);
         pid = 0;
         while (!pid) {
           sigsuspend(&old_mask);
         }
         sigprocmask(SIG_SETMASK, &old_mask, NULL);
       } else {
-        char *str = strdup(cmd);
-        add_job(c_pid, str);
-        printf("%d %s has started\n", c_pid, strdup(str));
+        add_job(jobs, jobs_count, c_pid, str, 1);
+        printf("%d %s has started\n", c_pid, str);
       }
     }
 
