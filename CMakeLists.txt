@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
-project(my_c_project LANGUAGES C)
+
+project(shell LANGUAGES C)
 
 # Set the C standard
 set(CMAKE_C_STANDARD 11)
@@ -21,15 +22,13 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Source files
-file(GLOB_RECURSE SOURCES src/*.c)
-include_directories(include)
-
 # Create the executable
-add_executable(my_c_project ${SOURCES})
+add_executable(${PROJECT_NAME} src/main.c src/utils.c src/job.c src/slice.c)
 
 # Add compile options
-target_compile_options(my_c_project PRIVATE -Wall -Wextra -pedantic)
+target_compile_options(${PROJECT_NAME} PRIVATE -fsanitize=address -Wall -Wextra -pedantic)
+target_link_options(${PROJECT_NAME} PRIVATE -fsanitize=address)
+target_include_directories(${PROJECT_NAME} PRIVATE include)
 
 # Unit tests (optional)
 # enable_testing()
