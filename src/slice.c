@@ -1,8 +1,9 @@
 #include "slice.h"
-#include <_string.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 void init_slice(Slice *slice, uint32_t cap) {
   slice->data = (char **)malloc(cap * sizeof(char *));
@@ -76,10 +77,18 @@ void print_slice(Slice *slice) {
     return;
   }
 
+  // printf("\n----PRINT SLICE----\n");
+  // printf("slice->len = %d\n", slice->len);
+  // printf("slice->cap = %d\n", slice->cap);
+
   for (size_t i = 0; i < slice->len; i++) {
     char *s = slice->data[i];
     if (s) {
-      printf("%s\n", s);
+      // printf("i:%zu - el: %s\n", i, s);
+    } else {
+      // printf("i:%zu - el: NULL\n", i);
     }
   }
+
+  // printf("----PRINT SLICE----\n\n");
 }
