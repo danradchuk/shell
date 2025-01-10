@@ -1,5 +1,4 @@
-#include "job.c"
-#include "slice.h"
+#include "job.h"
 #include "utils.h"
 #include <err.h>
 #include <signal.h>
@@ -10,9 +9,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+typedef struct {
+  char *cmd;
+  char **args;
+} ExecvpCmd;
+
 // Global State
 Job *jobs[MAX_JOB];
-size_t *jobs_count = 0;
+size_t jobs_count = 0;
 volatile sig_atomic_t pid;
 volatile sig_atomic_t fg_pid;
 
@@ -37,32 +41,59 @@ static void handle_sigchld(int sig) {
   pid_t waited_pid;
 
   while ((waited_pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
-    pid = waited_pid;
-    Job *job = get_job_by_pid(jobs, pid);
+    Job *job = get_job_by_pid(jobs, waited_pid);
 
-    if (WIFSTOPPED(status)) {
-      // change_job_status(waited_pid, "stopped");
+    if (job->is_background) {
+      if (WIFSTOPPED(status)) {
+        char buf[256];
+        int len = snprintf(buf, sizeof(buf),
+                           "\nsh: Job %zu, [%d] '%s' has stopped.\n", job->idx,
+                           waited_pid, "sleep");
+        write(STDOUT_FILENO, buf, len);
+        job->status = "stopped";
+        return;
+      }
+      if (WIFEXITED(status)) {
+        char buf[256];
+        int len =
+            snprintf(buf, sizeof(buf), "\nsh: Job %zu, [%d] '%s' has ended.\n",
+                     job->idx, waited_pid, "sleep");
+        write(STDOUT_FILENO, buf, len);
+        write(STDOUT_FILENO, "sh:$ ", 5);
 
-      job->status = "stopped";
-
-      char buf[256];
-      int len =
-          snprintf(buf, sizeof(buf), "\nsh: Job %zu, [%d] '%s' has stopped.\n",
-                   job->idx, waited_pid, "sleep");
-      write(STDOUT_FILENO, buf, len);
-      return;
+        delete_job(jobs, &jobs_count, waited_pid);
+        return;
+      }
+      if (WIFSIGNALED(status)) {
+        int sig_num = WTERMSIG(status);
+        if (sig_num == 2) { // SIGINT
+          delete_job(jobs, &jobs_count, waited_pid);
+        }
+        return;
+      }
+    } else {
+      pid = waited_pid; // notify the main loop
+      if (WIFSTOPPED(status)) {
+        char buf[256];
+        int len = snprintf(buf, sizeof(buf),
+                           "\nsh: Job %zu, [%d] '%s' has stopped.\n", job->idx,
+                           waited_pid, "sleep");
+        write(STDOUT_FILENO, buf, len);
+        job->status = "stopped";
+        return;
+      }
+      if (WIFEXITED(status)) {
+        delete_job(jobs, &jobs_count, waited_pid);
+        return;
+      }
+      if (WIFSIGNALED(status)) {
+        int sig_num = WTERMSIG(status);
+        if (sig_num == 2) { // SIGINT
+          delete_job(jobs, &jobs_count, waited_pid);
+        }
+        return;
+      }
     }
-
-    if (job->is_background) { // background job
-      char buf[256];
-      int len =
-          snprintf(buf, sizeof(buf), "\nsh: Job %zu, [%d] '%s' has ended.\n",
-                   job->idx, waited_pid, "sleep");
-      write(STDOUT_FILENO, buf, len);
-      write(STDOUT_FILENO, "sh:$ ", 5);
-    }
-
-    delete_job(jobs, jobs_count, waited_pid);
   }
 }
 
@@ -94,10 +125,10 @@ int main(int argc, char **argv) {
   for (;;) {
     printf("sh:$ ");
 
+    // read & sanitize a user input
     char *input = NULL;
     size_t len = 0;
     ssize_t read;
-
     read = getline(&input, &len, stdin);
     if (read == -1) {
       perror("getline");
@@ -109,8 +140,24 @@ int main(int argc, char **argv) {
     Slice slice;
     init_slice(&slice, 4);
     tokenize_user_input(&slice, input);
-    // print_slice(&slice);
-    char *cmd = get_slice_elem(&slice, 0);
+
+    // rewrite bg %id command with kill -CONT <PID>
+    if (strcmp((&slice)->data[0], "bg") == 0) {
+      int j_id = atoi(get_slice_elem(&slice, 1));
+      Job *j = jobs[j_id];
+
+      dispose_slice(&slice);
+      init_slice(&slice, 4);
+
+      // tokenize_user_input(&slice, input);
+      append_slice(&slice, "kill");
+      append_slice(&slice, "-CONT");
+      char buf[6];
+      int len = snprintf(buf, sizeof(buf), "%d", j->pid);
+      append_slice(&slice, strdup(buf));
+    }
+
+    char *cmd = strdup(get_slice_elem(&slice, 0));
     char *amp = get_slice_elem(&slice, (&slice)->len - 1);
 
     // handle background job sign
@@ -129,7 +176,7 @@ int main(int argc, char **argv) {
 
     // handle jobs list
     if (strcmp(cmd, "jobs") == 0) {
-      list_job(jobs, *jobs_count);
+      list_job(jobs, jobs_count);
       continue;
     }
 
@@ -148,10 +195,12 @@ int main(int argc, char **argv) {
     if (!bg) {
       sigprocmask(SIG_BLOCK, &new_mask, &old_mask);
     }
-
     pid_t c_pid = fork();
     if (c_pid < 0) {
-      perror("fork failed");
+      free(input);
+      dispose_slice(&slice);
+
+      perror("fork");
       return 1;
     }
 
@@ -164,24 +213,24 @@ int main(int argc, char **argv) {
         free(input);
         dispose_slice(&slice);
 
-        perror("execvp failed");
+        perror("execvp");
         exit(1);
       }
     } else { // parent
       // printf("Parent: %d\n", c_pid);
-      char *str = strdup(cmd);
+      // char *str = strdup(cmd);
 
       if (!bg) {
         fg_pid = c_pid;
-        add_job(jobs, jobs_count, c_pid, str, 0);
+        add_job(jobs, &jobs_count, c_pid, cmd, 0);
         pid = 0;
         while (!pid) {
           sigsuspend(&old_mask);
         }
         sigprocmask(SIG_SETMASK, &old_mask, NULL);
       } else {
-        add_job(jobs, jobs_count, c_pid, str, 1);
-        printf("%d %s has started\n", c_pid, str);
+        add_job(jobs, &jobs_count, c_pid, cmd, 1);
+        printf("%d %s has started\n", c_pid, cmd);
       }
     }
 
